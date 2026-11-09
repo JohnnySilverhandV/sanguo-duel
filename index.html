@@ -1,0 +1,1321 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>三国格斗 · 骨架原型</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #14161a;
+    color: #d8dbe0;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 16px;
+  }
+  #wrap { position: relative; width: 100%; max-width: 960px; }
+  canvas {
+    display: block; width: 100%; height: auto;
+    background: #1b1e24; border-radius: 6px;
+    box-shadow: 0 8px 40px rgba(0,0,0,.6);
+    image-rendering: auto;
+  }
+  #hint {
+    margin-top: 12px; font-size: 12px; line-height: 2;
+    color: #8b919b; text-align: center; max-width: 960px;
+  }
+  #hint b { color: #c9ced6; font-weight: 500; }
+  kbd {
+    display: inline-block; padding: 1px 6px; margin: 0 2px;
+    background: #2a2e36; border: 1px solid #3a3f4a; border-radius: 4px;
+    font-family: ui-monospace, Consolas, monospace; font-size: 11px; color: #cfd4dc;
+  }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="960" height="540"></canvas></div>
+<div id="hint">
+  <b>移动</b> <kbd>A</kbd><kbd>D</kbd> &nbsp;·&nbsp; <b>蹲</b> <kbd>S</kbd> &nbsp;·&nbsp;
+  <b>轻击</b> <kbd>J</kbd> &nbsp;·&nbsp; <b>大招（↓↓+J）</b> 连按两下 <kbd>S</kbd> 再按 <kbd>J</kbd><br>
+  关羽 <b style="color:#5fe0c0">青龙偃月斩</b> 单发重劈 · 赵云 <b style="color:#9fd8ff">百鸟朝凤</b> 三段连刺<br>
+  <kbd>F1</kbd> 判定框 &nbsp;·&nbsp; <kbd>F2</kbd> 帧数据 &nbsp;·&nbsp; <kbd>P</kbd> 暂停 &nbsp;·&nbsp;
+  <kbd>,</kbd><kbd>.</kbd> 逐帧 &nbsp;·&nbsp; <kbd>R</kbd> 重开
+</div>
+<script>
+"use strict";
+
+// ============================================================
+// 基础常量
+// ============================================================
+const W = 960, H = 540;
+const GROUND = 448;
+const FPS = 60;
+const STEP_MS = 1000 / FPS;
+const WALL_L = 70, WALL_R = 890;
+
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+
+// ============================================================
+// 姿态库（火柴人关节参数）
+//   lean  : 躯干前倾角（度，正=向面向方向倾）
+//   hipY  : 髋部离地高度
+//   armF  : 前手相对肩的位置（x 向前，y 向下）
+//   armB  : 后手
+//   spread: 双脚前后分开距离
+// ============================================================
+const POSES = {
+  idle:      { lean:  6, hipY: 92, armF: {x: 24, y: -34}, armB: {x: -20, y: 50}, spread: 26 },
+  idle2:     { lean:  4, hipY: 90, armF: {x: 22, y: -28}, armB: {x: -18, y: 54}, spread: 26 },
+  walk1:     { lean:  8, hipY: 90, armF: {x: 30, y: -18}, armB: {x: -26, y: 48}, spread: 38 },
+  walk2:     { lean:  8, hipY: 92, armF: {x: 14, y: -38}, armB: {x: -10, y: 46}, spread: 16 },
+  crouch:    { lean: 20, hipY: 56, armF: {x: 22, y: -10}, armB: {x: -16, y: 36}, spread: 36 },
+  hit:       { lean:-16, hipY: 88, armF: {x: 4, y: 26}, armB: {x: -12, y: 22}, spread: 32 },
+  hitDown:   { lean:-26, hipY: 78, armF: {x: 0, y: 34}, armB: {x: -8, y: 30}, spread: 38 },
+  ko:        { lean:-72, hipY: 34, armF: {x: 16, y: 54}, armB: {x: -8, y: 58}, spread: 44 }
+};
+
+// ============================================================
+// 角色专属姿态
+//   wAng: 武器朝向（度）。0=水平向前，正值向下倾斜，负值向上抬起。
+//         不填则沿用"手肘→手"的延长方向。
+//
+//   ★ 两个角色的动作语言从根上不同：
+//     关羽 —— 弧线。刀从上方抡下来，重心从前上落到前下，全身带转体。
+//     赵云 —— 直线。枪收腰侧，一脚蹬地整条枪水平贯出，重心只走前后轴。
+// ============================================================
+const POSE_SETS = {
+  guanyu: {
+    // ---- 待机：横刀拎在身侧，刀头朝前上 ----
+    idle:   { lean:  4, hipY: 92, armF: {x: 30, y: -14}, armB: {x: -14, y: 46}, spread: 30, wAng: -46 },
+    idle2:  { lean:  2, hipY: 90, armF: {x: 28, y: -10}, armB: {x: -12, y: 50}, spread: 30, wAng: -40 },
+    walk1:  { lean:  6, hipY: 90, armF: {x: 34, y: -18}, armB: {x: -22, y: 48}, spread: 42, wAng: -50 },
+    walk2:  { lean:  6, hipY: 92, armF: {x: 22, y:  -8}, armB: {x: -10, y: 46}, spread: 20, wAng: -36 },
+    crouch: { lean: 22, hipY: 56, armF: {x: 26, y:  10}, armB: {x: -14, y: 40}, spread: 40, wAng:  10 },
+
+    // ---- 轻击：单手斜劈，刀从脑后抹到身前 ----
+    lWind:  { lean:-12, hipY: 94, armF: {x: -12, y: -78}, armB: {x: -26, y: 44}, spread: 24, wAng: -128 },
+    lHit:   { lean: 24, hipY: 88, armF: {x:  50, y:  22}, armB: {x: -30, y: 58}, spread: 42, wAng:   46 },
+    lRec:   { lean: 12, hipY: 92, armF: {x:  34, y:  34}, armB: {x: -24, y: 54}, spread: 32, wAng:   70 },
+
+    // ---- 大招：双手过顶，全身压上去的重劈 ----
+    sWind:  { lean:-16, hipY: 96, armF: {x:  -6, y: -88}, armB: {x: -20, y: -60}, spread: 22, wAng: -112 },
+    sWind2: { lean:-22, hipY: 98, armF: {x: -14, y: -94}, armB: {x: -26, y: -72}, spread: 20, wAng: -104 },
+    sHit:   { lean: 32, hipY: 80, armF: {x:  54, y:  48}, armB: {x: -36, y: 64}, spread: 50, wAng:   66 },
+    sRec:   { lean: 20, hipY: 86, armF: {x:  42, y:  58}, armB: {x: -30, y: 66}, spread: 40, wAng:   84 }
+  },
+
+  zhaoyun: {
+    // ---- 待机：枪尖平指对手，前手只是托着 ----
+    idle:   { lean:  8, hipY: 92, armF: {x: 18, y:  2}, armB: {x: -18, y: 46}, spread: 30, wAng:  -4 },
+    idle2:  { lean:  6, hipY: 90, armF: {x: 16, y:  6}, armB: {x: -16, y: 50}, spread: 30, wAng:  -2 },
+    walk1:  { lean: 10, hipY: 90, armF: {x: 24, y: -2}, armB: {x: -24, y: 46}, spread: 42, wAng:  -6 },
+    walk2:  { lean: 10, hipY: 92, armF: {x: 12, y:  6}, armB: {x:  -8, y: 42}, spread: 18, wAng:  -2 },
+    crouch: { lean: 24, hipY: 56, armF: {x: 20, y: 20}, armB: {x: -14, y: 38}, spread: 40, wAng:  -8 },
+
+    // ---- 轻击：短促平刺，枪走一条直线 ----
+    lWind:  { lean: -6, hipY: 92, armF: {x: -10, y:  4}, armB: {x: -22, y: 42}, spread: 30, wAng:   0 },
+    lHit:   { lean: 18, hipY: 88, armF: {x:  54, y: -4}, armB: {x: -28, y: 56}, spread: 48, wAng:   0 },
+    lRec:   { lean:  6, hipY: 92, armF: {x:  18, y:  4}, armB: {x: -20, y: 48}, spread: 34, wAng:  -2 },
+
+    // ---- 大招：深坐蓄力 → 一式三连刺 ----
+    sWind:  { lean:-14, hipY: 88, armF: {x: -22, y:  8}, armB: {x: -26, y: 44}, spread: 44, wAng:   0 },
+    sWind2: { lean:-20, hipY: 84, armF: {x: -30, y: 12}, armB: {x: -30, y: 48}, spread: 48, wAng:   0 },
+    sHit:   { lean: 28, hipY: 86, armF: {x:  72, y: -6}, armB: {x: -36, y: 58}, spread: 58, wAng:   0 },
+    sHit2:  { lean: 20, hipY: 88, armF: {x:  58, y:  0}, armB: {x: -30, y: 56}, spread: 52, wAng:   0 },
+    sRec:   { lean: 10, hipY: 90, armF: {x:  26, y:  4}, armB: {x: -22, y: 50}, spread: 38, wAng:  -6 }
+  }
+};
+
+function poseOf(f, key) {
+  const set = f.cfg.poses;
+  return (set && set[key]) || POSES[key] || POSES.idle;
+}
+
+// ============================================================
+// 角色数据
+//   招式帧格式：{ dur:停留逻辑帧, pose:姿态, hit:判定框|null }
+//   hit.ox 向前偏移  hit.oy 相对地面向上为负
+// ============================================================
+const CHARS = {
+  guanyu: {
+    id: 'guanyu',
+    name: '关羽',
+    weapon: 'blade',        // 青龙偃月刀
+    hpMax: 100,
+    speed: 1.9,             // 慢
+    tint: '#c94f4f',
+    dark: '#8d3232',
+    fx: '#5fe0c0',          // 招式特效色：青龙青
+    poses: POSE_SETS.guanyu,
+    actions: {
+      light: {
+        frames: [
+          { dur: 5,  pose: 'lWind' },
+          { dur: 3,  pose: 'lHit',  fx: 'slash',
+            hit: { ox: 30, oy: -152, w: 78, h: 62, dmg: 8, hitstun: 15, kb: 3.0, stop: 6 } },
+          { dur: 10, pose: 'lRec' }
+        ]
+      },
+      // 大招：青龙偃月斩 —— 单发重斩。刀光横扫，命中把人整个劈飞。
+      special: {
+        label: '青龙偃月斩',
+        frames: [
+          { dur: 14, pose: 'sWind'  },
+          { dur: 4,  pose: 'sWind2', fx: 'charge' },
+          { dur: 5,  pose: 'sHit',   fx: 'slashBig',
+            hit: { ox: 24, oy: -172, w: 132, h: 124, dmg: 24, hitstun: 34, kb: 9.5, stop: 14, dash: 0.8, heavy: true } },
+          { dur: 22, pose: 'sRec' }
+        ]
+      }
+    }
+  },
+  zhaoyun: {
+    id: 'zhaoyun',
+    name: '赵云',
+    weapon: 'spear',        // 龙胆亮银枪
+    hpMax: 96,
+    speed: 2.9,             // 快
+    tint: '#4f8bd4',
+    dark: '#2f5f9c',
+    fx: '#9fd8ff',          // 招式特效色：银枪冷光
+    poses: POSE_SETS.zhaoyun,
+    actions: {
+      light: {
+        frames: [
+          { dur: 3, pose: 'lWind' },
+          { dur: 2, pose: 'lHit', fx: 'thrust',
+            hit: { ox: 34, oy: -158, w: 96, h: 34, dmg: 5, hitstun: 11, kb: 2.2, stop: 4 } },
+          { dur: 7, pose: 'lRec' }
+        ]
+      },
+      // 大招：百鸟朝凤 —— 三段连刺。每段独立判定，刺完自己往前压一段。
+      // 与关羽的"一发入魂"对立：伤害分散在三次命中上，全中才追平，但速度快、能接。
+      special: {
+        label: '百鸟朝凤',
+        frames: [
+          { dur: 9,  pose: 'sWind' },
+          { dur: 3,  pose: 'sWind2', fx: 'charge' },
+          { dur: 2,  pose: 'sHit',  fx: 'thrustBig',
+            hit: { ox: 36, oy: -160, w: 112, h: 36, dmg: 6, hitstun: 16, kb: 1.4, stop: 5, dash: 5.0 } },
+          { dur: 3,  pose: 'sHit2' },
+          { dur: 2,  pose: 'sHit',  fx: 'thrustBig',
+            hit: { ox: 36, oy: -160, w: 112, h: 36, dmg: 6, hitstun: 16, kb: 1.4, stop: 5, dash: 5.0 } },
+          { dur: 3,  pose: 'sHit2' },
+          { dur: 3,  pose: 'sHit',  fx: 'thrustBig',
+            hit: { ox: 34, oy: -164, w: 124, h: 42, dmg: 11, hitstun: 30, kb: 8.0, stop: 12, dash: 6.5, heavy: true } },
+          { dur: 16, pose: 'sRec' }
+        ]
+      }
+    }
+  }
+};
+
+// ============================================================
+// 全局状态
+// ============================================================
+let G = null;
+let frameCount = 0;
+let hitstop = 0;
+let paused = false;
+let showBoxes = false;
+let showData = false;
+let shakeX = 0, shakeAmp = 0;
+let flashAmp = 0;
+let koTimer = -1;
+let winner = null;
+
+// ============================================================
+// 特效队列
+//   所有特效都是纯视觉，不参与任何判定。
+//   注意：特效不受 hitstop 影响 —— 命中定格时火花继续炸，
+//   这是"卡肉感"的关键，定格如果连火花一起冻住就变成掉帧了。
+// ============================================================
+const FX = [];
+
+function fx(o) {
+  FX.push(Object.assign({ t: 0, life: 16, seed: Math.random() * 100 }, o));
+  if (FX.length > 90) FX.shift();
+}
+
+function stepFx() {
+  for (let i = FX.length - 1; i >= 0; i--) {
+    if (++FX[i].t >= FX[i].life) FX.splice(i, 1);
+  }
+  if (flashAmp > 0) flashAmp *= 0.8;
+}
+
+// 招式帧上挂的特效：进入该帧时播一次
+function spawnActionFx(f, kind) {
+  const col = f.cfg.fx;
+  const hx = f.x + f.face * 46;
+  const hy = GROUND - 120;
+
+  if (kind === 'slash') {
+    // 关羽轻击：一道小弧
+    fx({ type: 'slash', x: f.x + f.face * 26, y: GROUND - 142, face: f.face,
+         r: 92, a0: -118, sweep: 172, color: col, thick: 12, life: 11 });
+  } else if (kind === 'slashBig') {
+    // 关羽大招：巨型刀弧 + 龙形残迹 + 地面冲击
+    fx({ type: 'slash', x: f.x + f.face * 20, y: GROUND - 150, face: f.face,
+         r: 138, a0: -120, sweep: 186, color: col, thick: 30, life: 18 });
+    fx({ type: 'slash', x: f.x + f.face * 20, y: GROUND - 150, face: f.face,
+         r: 104, a0: -120, sweep: 186, color: '#eafff8', thick: 7, life: 13 });
+    fx({ type: 'shock', x: f.x + f.face * 120, y: GROUND, r: 130, color: col, life: 20 });
+    flashAmp = 0.34;
+  } else if (kind === 'thrust') {
+    fx({ type: 'thrust', x: hx - f.face * 60, y: GROUND - 152, face: f.face,
+         len: 150, w: 26, color: col, life: 8 });
+  } else if (kind === 'thrustBig') {
+    fx({ type: 'thrust', x: f.x - f.face * 40, y: GROUND - 156, face: f.face,
+         len: 230, w: 46, color: col, life: 10, rays: 5 });
+    fx({ type: 'thrust', x: f.x - f.face * 40, y: GROUND - 156, face: f.face,
+         len: 200, w: 12, color: '#ffffff', life: 7, rays: 1 });
+  } else if (kind === 'charge') {
+    fx({ type: 'charge', x: f.x, y: GROUND, r: 78, color: col, life: 12, follow: f });
+  }
+}
+
+// 输入
+const keys = Object.create(null);
+const pressed = Object.create(null);
+
+// ============================================================
+// 角色工厂
+// ============================================================
+function makeFighter(charId, x, face, isAI) {
+  const c = CHARS[charId];
+  return {
+    cfg: c, name: c.name,
+    x, face, isAI,
+    hp: c.hpMax,
+    state: 'idle',        // idle | walk | crouch | attack | hit | ko
+    action: null,
+    actName: null,
+    frameIdx: 0,
+    frameTick: 0,
+    hitstun: 0,
+    hitFlash: 0,
+    hitDone: Object.create(null),   // 已命中的帧号 → 一段判定只吃一次
+    fxDone: Object.create(null),    // 已播放特效的帧号
+    vx: 0,
+    animT: 0,
+    aiTimer: 0,
+    aiMove: 0,
+    aiAction: null,
+    downPresses: [],
+    lastDown: false,
+    lastLight: false,
+    touchSeq: 0
+  };
+}
+
+function resetGame() {
+  G = {
+    p1: makeFighter('guanyu', 330, 1, false),
+    p2: makeFighter('zhaoyun', 630, -1, true),
+    time: 0
+  };
+  frameCount = 0;
+  hitstop = 0;
+  koTimer = -1;
+  winner = null;
+  shakeAmp = 0;
+  flashAmp = 0;
+  FX.length = 0;
+  paused = false;
+}
+
+// ============================================================
+// 招式启动
+// ============================================================
+function startAction(f, name) {
+  const act = f.cfg.actions[name];
+  if (!act) return;
+  f.state = 'attack';
+  f.action = act;
+  f.actName = name;
+  f.frameIdx = 0;
+  f.frameTick = 0;
+  f.hitDone = Object.create(null);
+  f.fxDone = Object.create(null);
+
+  // 大招报出招式名（格斗游戏的仪式感，也让两个角色一眼分得出来）
+  if (act.label) {
+    fx({ type: 'name', text: act.label, x: f.x, y: GROUND - 210,
+         face: f.face, color: f.cfg.fx, life: 46 });
+    spawnActionFx(f, 'charge');
+  }
+}
+
+function busy(f) {
+  return f.state === 'attack' || f.state === 'hit' || f.state === 'ko';
+}
+
+// ============================================================
+// 判定框计算
+// ============================================================
+function currentHitbox(f) {
+  if (f.state !== 'attack' || !f.action) return null;
+  const fr = f.action.frames[f.frameIdx];
+  return fr && fr.hit ? fr.hit : null;
+}
+
+function hurtboxOf(f) {
+  if (f.state === 'ko') {
+    return { x: f.x - 60, y: GROUND - 70, w: 120, h: 70 };
+  }
+  const crouched = f.state === 'crouch';
+  if (crouched) return { x: f.x - 26, y: GROUND - 116, w: 52, h: 116 };
+  return { x: f.x - 24, y: GROUND - 174, w: 48, h: 174 };
+}
+
+function pushboxOf(f) {
+  return { x: f.x - 22, y: GROUND - 130, w: 44, h: 130 };
+}
+
+function hitboxWorld(f, hb) {
+  const x = f.face > 0 ? f.x + hb.ox : f.x - hb.ox - hb.w;
+  return { x, y: GROUND + hb.oy, w: hb.w, h: hb.h };
+}
+
+function overlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// ============================================================
+// 逻辑帧推进
+// ============================================================
+function step() {
+  frameCount++;
+
+  // 特效 / 震屏 / 闪白 独立推进：即使逻辑定格，火花也照炸
+  stepFx();
+  shakeAmp *= 0.88;
+
+  // 命中定格：双方一起冻结
+  if (hitstop > 0) { hitstop--; return; }
+
+  if (koTimer >= 0) { koTimer++; return; }
+
+  const { p1, p2 } = G;
+  G.time++;
+
+  // ---- 输入采集 ----
+  readInput(p1);
+  if (p2.isAI) aiThink(p2, p1);
+
+  // ---- 状态更新 ----
+  updateFighter(p1, p2);
+  updateFighter(p2, p1);
+
+  // ---- 推挤：防止两人重叠 ----
+  resolvePush(p1, p2);
+
+  // ---- 判定 ----
+  checkHits(p1, p2);
+  checkHits(p2, p1);
+
+  // ---- 边界 ----
+  for (const f of [p1, p2]) {
+    f.x = Math.max(WALL_L, Math.min(WALL_R, f.x));
+  }
+
+  // ---- KO ----
+  if (koTimer < 0) {
+    if (p1.hp <= 0 || p2.hp <= 0) {
+      koTimer = 0;
+      winner = p1.hp <= 0 && p2.hp <= 0 ? 'draw' : (p1.hp <= 0 ? p2 : p1);
+      if (p1.hp <= 0) { p1.state = 'ko'; p1.action = null; }
+      if (p2.hp <= 0) { p2.state = 'ko'; p2.action = null; }
+    }
+  }
+}
+
+function updateFighter(f, opp) {
+  if (f.hitFlash > 0) f.hitFlash--;
+
+  // 受击硬直
+  if (f.hitstun > 0) {
+    f.hitstun--;
+    f.state = 'hit';
+    f.x += f.vx;
+    f.vx *= 0.82;
+    if (f.hitstun === 0) { f.state = 'idle'; f.vx = 0; }
+    return;
+  }
+
+  if (f.state === 'ko') { f.x += f.vx; f.vx *= 0.9; return; }
+
+  // 出招推进
+  if (f.state === 'attack' && f.action) {
+    const fr = f.action.frames[f.frameIdx];
+    if (fr.hit && fr.hit.dash) f.x += f.face * fr.hit.dash;
+
+    // 进入新的一帧 → 播放该帧挂的特效
+    if (fr.fx && !f.fxDone[f.frameIdx]) {
+      f.fxDone[f.frameIdx] = 1;
+      spawnActionFx(f, fr.fx);
+    }
+
+    f.frameTick++;
+    if (f.frameTick >= fr.dur) {
+      f.frameTick = 0;
+      f.frameIdx++;
+      if (f.frameIdx >= f.action.frames.length) {
+        f.state = 'idle';
+        f.action = null;
+        f.actName = null;
+        f.frameIdx = 0;
+      }
+    }
+    f.animT++;
+    return;
+  }
+
+  // 非 AI 的移动由输入决定，AI 由 aiThink 决定
+  if (f.isAI) {
+    // AI 的移动在 aiThink 里写 vx，这里只应用
+    f.x += f.vx;
+    if (f.vx !== 0) { f.state = 'walk'; } else if (f.state === 'walk') { f.state = 'idle'; }
+    // 朝向始终面向对手
+    f.face = opp.x > f.x ? 1 : -1;
+    f.animT++;
+    return;
+  }
+
+  // 玩家
+  const left = keys['a'], right = keys['d'], down = keys['s'];
+  let mv = 0;
+  if (left && !right) mv = -1;
+  if (right && !left) mv = 1;
+
+  if (down && mv === 0) {
+    f.state = 'crouch';
+  } else if (mv !== 0) {
+    f.state = 'walk';
+    f.x += mv * f.cfg.speed;
+    f.face = opp.x > f.x ? 1 : -1;
+  } else {
+    f.state = 'idle';
+  }
+  f.animT++;
+}
+
+// ============================================================
+// 玩家输入 → 动作
+// ============================================================
+function readInput(f) {
+  const down = !!keys['s'];
+  const light = !!keys['j'];
+
+  // 记录下方向按下边沿
+  if (down && !f.lastDown) {
+    f.downPresses.push(frameCount);
+  }
+  f.lastDown = down;
+
+  // 清理 24 帧前的记录
+  f.downPresses = f.downPresses.filter(t => frameCount - t < 24);
+
+  // 轻击按下瞬间
+  if (light && !f.lastLight && !busy(f)) {
+    const twoDowns = f.downPresses.length >= 2;
+    if (twoDowns) {
+      startAction(f, 'special');
+      f.downPresses = [];
+    } else {
+      startAction(f, 'light');
+    }
+  }
+  f.lastLight = light;
+}
+
+// ============================================================
+// 简易 AI（赵云）
+// ============================================================
+function aiThink(f, opp) {
+  if (busy(f)) { f.vx = 0; return; }
+
+  const dist = Math.abs(opp.x - f.x);
+  const dir = opp.x > f.x ? 1 : -1;
+  f.face = dir;
+
+  if (f.aiTimer > 0) {
+    f.aiTimer--;
+  } else {
+    const r = Math.random();
+    if (dist > 300) {
+      f.aiMove = dir; f.aiTimer = 24 + (r * 12) | 0;
+    } else if (dist > 175) {
+      if (r < 0.78) { f.aiMove = dir; f.aiTimer = 16; }
+      else { f.aiMove = 0; f.aiTimer = 12; }
+    } else if (dist > 118) {
+      if (r < 0.62) { f.aiMove = dir; f.aiTimer = 10; }
+      else if (r < 0.86) { f.aiMove = 0; f.aiTimer = 14; }
+      else { f.aiMove = -dir; f.aiTimer = 14; }
+    } else {
+      // 进入攻击距离
+      if (r < 0.52) { f.aiAction = 'light'; f.aiTimer = 26; f.aiMove = 0; }
+      else if (r < 0.72) { f.aiAction = 'special'; f.aiTimer = 48; f.aiMove = 0; }
+      else if (r < 0.9) { f.aiMove = -dir; f.aiTimer = 20; }
+      else { f.aiMove = 0; f.aiTimer = 16; }
+    }
+  }
+
+  if (f.aiAction) {
+    startAction(f, f.aiAction);
+    f.aiAction = null;
+    f.vx = 0;
+    return;
+  }
+
+  f.vx = (f.aiMove || 0) * f.cfg.speed * 0.62;
+}
+
+// ============================================================
+// 推挤
+// ============================================================
+function resolvePush(a, b) {
+  const pa = pushboxOf(a), pb = pushboxOf(b);
+  if (!overlap(pa, pb)) return;
+  const overlapX = Math.min(pa.x + pa.w, pb.x + pb.w) - Math.max(pa.x, pb.x);
+  if (overlapX <= 0) return;
+  const dir = a.x < b.x ? -1 : 1;
+  a.x += dir * overlapX * 0.5;
+  b.x -= dir * overlapX * 0.5;
+}
+
+// ============================================================
+// 命中检测与结算
+// ============================================================
+function checkHits(att, def) {
+  if (att.state !== 'attack' || !att.action) return;
+  if (def.state === 'ko') return;
+  // 每"段"判定只命中一次：用帧号去重，所以多段技在不同帧可以连续命中
+  if (att.hitDone[att.frameIdx]) return;
+  const hb = currentHitbox(att);
+  if (!hb) return;
+
+  const world = hitboxWorld(att, hb);
+  const hurt = hurtboxOf(def);
+  if (!overlap(world, hurt)) return;
+
+  // 命中！
+  att.hitDone[att.frameIdx] = true;
+
+  const dmg = hb.dmg;
+  def.hp = Math.max(0, def.hp - dmg);
+  def.hitstun = hb.hitstun;
+  def.state = 'hit';
+  def.action = null;
+  def.actName = null;
+  def.face = att.x > def.x ? 1 : -1;
+  def.vx = (def.x >= att.x ? 1 : -1) * hb.kb;
+  def.hitFlash = hb.heavy ? 10 : 6;
+
+  // 命中定格
+  hitstop = hb.stop;
+  shakeAmp = hb.stop * (hb.heavy ? 2.2 : 1.6);
+
+  // 火花：落在两个框实际相交的位置，玩家眼睛才觉得"打在这儿"
+  const ix = (Math.max(world.x, hurt.x) + Math.min(world.x + world.w, hurt.x + hurt.w)) / 2;
+  const iy = (Math.max(world.y, hurt.y) + Math.min(world.y + world.h, hurt.y + hurt.h)) / 2;
+  fx({ type: 'impact', x: ix, y: iy, r: hb.heavy ? 78 : 34,
+       color: att.cfg.fx, rays: hb.heavy ? 14 : 8, life: hb.heavy ? 16 : 10 });
+
+  if (hb.heavy) {
+    fx({ type: 'shock', x: ix, y: GROUND, r: 150, color: att.cfg.fx, life: 22 });
+    flashAmp = 0.5;
+  }
+}
+
+// ============================================================
+// 渲染
+// ============================================================
+function render() {
+  ctx.save();
+  ctx.clearRect(0, 0, W, H);
+
+  // 屏幕震动
+  if (shakeAmp > 0.3) {
+    shakeX = (Math.random() - 0.5) * shakeAmp;
+    ctx.translate(shakeX, (Math.random() - 0.5) * shakeAmp * 0.6);
+  }
+
+  drawBackground();
+  drawFighter(G.p2);
+  drawFighter(G.p1);
+  drawFx();
+
+  if (showBoxes) {
+    drawBoxes(G.p2);
+    drawBoxes(G.p1);
+  }
+
+  ctx.restore();
+
+  drawHUD();
+  if (flashAmp > 0.01) {
+    ctx.save();
+    ctx.globalAlpha = Math.min(0.5, flashAmp);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+  }
+  if (showData) drawFrameData();
+  if (paused) drawPausedOverlay();
+}
+
+function drawBackground() {
+  // 天空
+  const sky = ctx.createLinearGradient(0, 0, 0, GROUND);
+  sky.addColorStop(0, '#232833');
+  sky.addColorStop(1, '#2d3340');
+  ctx.fillStyle = sky;
+  ctx.fillRect(-40, -40, W + 80, GROUND + 40);
+
+  // 远山
+  ctx.fillStyle = '#1e222b';
+  ctx.beginPath();
+  ctx.moveTo(-40, GROUND);
+  ctx.lineTo(120, 240);
+  ctx.lineTo(280, GROUND);
+  ctx.closePath();
+  ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(620, GROUND);
+  ctx.lineTo(790, 200);
+  ctx.lineTo(980, GROUND);
+  ctx.closePath();
+  ctx.fill();
+
+  // 地面
+  ctx.fillStyle = '#181b21';
+  ctx.fillRect(-40, GROUND, W + 80, H - GROUND + 40);
+
+  // 地线
+  ctx.strokeStyle = '#3a4150';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(-40, GROUND);
+  ctx.lineTo(W + 40, GROUND);
+  ctx.stroke();
+
+  // 中线刻度
+  ctx.strokeStyle = '#262b34';
+  ctx.lineWidth = 1;
+  for (let x = WALL_L; x <= WALL_R; x += 60) {
+    ctx.beginPath();
+    ctx.moveTo(x, GROUND);
+    ctx.lineTo(x, GROUND + 10);
+    ctx.stroke();
+  }
+}
+
+// ---------- 特效绘制 ----------
+function drawFx() {
+  for (const e of FX) {
+    const p = e.t / e.life;
+    ctx.save();
+    if (e.type === 'slash') drawSlashFx(e, p);
+    else if (e.type === 'thrust') drawThrustFx(e, p);
+    else if (e.type === 'impact') drawImpactFx(e, p);
+    else if (e.type === 'shock') drawShockFx(e, p);
+    else if (e.type === 'charge') drawChargeFx(e, p);
+    else if (e.type === 'name') drawNameFx(e, p);
+    ctx.restore();
+  }
+}
+
+// 刀光：一段圆弧随手扫开，越扫越淡。关羽的招式语言＝弧。
+function drawSlashFx(e, p) {
+  const ease = 1 - Math.pow(1 - Math.min(1, p * 2.6), 3);
+  const a = 1 - p;
+  ctx.translate(e.x, e.y);
+  ctx.scale(e.face, 1);
+  ctx.lineCap = 'round';
+
+  const a0 = e.a0 * RAD;
+  const a1 = (e.a0 + e.sweep * ease) * RAD;
+  const rr = e.r * (0.9 + p * 0.14);
+
+  ctx.globalAlpha = a * 0.2;
+  ctx.strokeStyle = e.color;
+  ctx.lineWidth = e.thick * 2.0;
+  ctx.beginPath(); ctx.arc(0, 0, rr, a0, a1); ctx.stroke();
+
+  ctx.globalAlpha = a * 0.85;
+  ctx.lineWidth = e.thick;
+  ctx.beginPath(); ctx.arc(0, 0, rr, a0, a1); ctx.stroke();
+
+  ctx.globalAlpha = a;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = Math.max(1.5, e.thick * 0.2);
+  ctx.beginPath(); ctx.arc(0, 0, rr, a0, a1); ctx.stroke();
+}
+
+// 枪芒：几条平行光带沿一条直线贯出。赵云的语言＝直线。
+function drawThrustFx(e, p) {
+  const grow = Math.min(1, p * 3.4);
+  const len = e.len * (0.35 + grow * 0.72);
+  const a = 1 - p;
+  const rays = e.rays || 3;
+
+  ctx.translate(e.x, e.y);
+  ctx.scale(e.face, 1);
+  ctx.lineCap = 'round';
+
+  for (let i = 0; i < rays; i++) {
+    const k = rays === 1 ? 0 : (i / (rays - 1)) * 2 - 1;
+    const spread = e.w * 0.55 * k;
+    const taper = 1 - Math.abs(k) * 0.4;
+    ctx.globalAlpha = a * (1 - Math.abs(k) * 0.55);
+    ctx.strokeStyle = (i % 2) ? '#ffffff' : e.color;
+    ctx.lineWidth = Math.max(1.5, e.w * 0.2 * taper);
+    ctx.beginPath();
+    ctx.moveTo(-len * 0.2, spread);
+    ctx.lineTo(len * taper, spread * 0.22);
+    ctx.stroke();
+  }
+
+  ctx.globalAlpha = a * 0.9;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.ellipse(len, 0, 9 + 15 * (1 - p), 3.5 + 5 * (1 - p), 0, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// 命中火花：放射短线 + 中心爆点
+function drawImpactFx(e, p) {
+  const a = 1 - p;
+  const r0 = e.r * 0.22 * p;
+  const r1 = e.r * (0.26 + p * 0.9);
+  const n = e.rays || 8;
+
+  ctx.translate(e.x, e.y);
+  ctx.lineCap = 'round';
+
+  for (let i = 0; i < n; i++) {
+    const ang = (i / n) * Math.PI * 2 + e.seed;
+    const rr = 0.55 + 0.45 * Math.abs(Math.sin(i * 2.7 + e.seed));
+    ctx.globalAlpha = a * 0.9;
+    ctx.strokeStyle = (i % 3 === 0) ? '#ffffff' : e.color;
+    ctx.lineWidth = 2 + 4 * (1 - p) * rr;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(ang) * r0 * rr, Math.sin(ang) * r0 * rr);
+    ctx.lineTo(Math.cos(ang) * r1 * rr, Math.sin(ang) * r1 * rr);
+    ctx.stroke();
+  }
+
+  ctx.globalAlpha = a * 0.5;
+  ctx.fillStyle = e.color;
+  ctx.beginPath();
+  ctx.arc(0, 0, e.r * 0.34 * (1 - p * 0.6), 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// 地面冲击环（大招命中时）
+function drawShockFx(e, p) {
+  const a = 1 - p;
+  const rx = e.r * (0.2 + p * 1.15);
+  ctx.translate(e.x, e.y);
+
+  ctx.globalAlpha = a * 0.35;
+  ctx.strokeStyle = e.color;
+  ctx.lineWidth = 12 * (1 - p) + 2;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, rx * 0.72, rx * 0.72 * 0.2, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.globalAlpha = a * 0.8;
+  ctx.lineWidth = 4 * (1 - p) + 1;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, rx, rx * 0.22, 0, 0, Math.PI * 2);
+  ctx.stroke();
+}
+
+// 蓄力：收缩的气环 + 上浮光点
+function drawChargeFx(e, p) {
+  const f = e.follow;
+  const cxx = f ? f.x : e.x;
+  const a = p < 0.25 ? p / 0.25 : (1 - p) / 0.75;
+
+  ctx.translate(cxx, e.y);
+
+  const rr = e.r * (1 - p * 0.5);
+  ctx.globalAlpha = a * 0.5;
+  ctx.strokeStyle = e.color;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.ellipse(0, -62, rr * 0.55, rr * 0.55, 0, 0, Math.PI * 2);
+  ctx.stroke();
+
+  for (let i = 0; i < 7; i++) {
+    const ang = i * 2.399 + e.seed;
+    const rad = e.r * (0.32 + 0.5 * ((i * 37 % 100) / 100));
+    ctx.globalAlpha = a * 0.85;
+    ctx.fillStyle = (i % 2) ? '#ffffff' : e.color;
+    ctx.beginPath();
+    ctx.arc(Math.cos(ang) * rad, -10 - p * (86 + (i % 4) * 24), 2.5 + (i % 3), 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+// 招式名浮字
+function drawNameFx(e, p) {
+  const a = p < 0.15 ? p / 0.15 : (1 - p) / 0.85;
+  const y = e.y - p * 44;
+  ctx.globalAlpha = Math.max(0, a);
+  ctx.textAlign = 'center';
+  ctx.font = '700 27px "Microsoft YaHei", -apple-system, sans-serif';
+  ctx.lineWidth = 5;
+  ctx.strokeStyle = 'rgba(10,12,16,.85)';
+  ctx.strokeText(e.text, e.x + 2, y);
+  ctx.fillStyle = e.color;
+  ctx.fillText(e.text, e.x + 2, y);
+}
+
+// ---------- 火柴人绘制 ----------
+const RAD = Math.PI / 180;
+
+function drawFighter(f) {
+  const face = f.face;
+  const pose = getPose(f);
+  const bx = f.x;
+  const groundY = GROUND;
+
+  const hipY = groundY - pose.hipY;
+  const hipX = bx;
+  const neckX = hipX + face * Math.sin(pose.lean * RAD) * 56;
+  const neckY = hipY - Math.cos(pose.lean * RAD) * 56;
+  const shoulderX = neckX + face * Math.sin(pose.lean * RAD) * 8;
+  const shoulderY = neckY + Math.cos(pose.lean * RAD) * 8;
+  const headX = neckX + face * Math.sin(pose.lean * RAD) * 20;
+  const headY = neckY - Math.cos(pose.lean * RAD) * 20 - 4;
+
+  // 脚
+  const footF = { x: bx + face * pose.spread, y: groundY };
+  const footB = { x: bx - face * pose.spread, y: groundY };
+
+  // 膝（中点前推）
+  const kneeF = { x: (hipX + footF.x) / 2 + face * 7, y: (hipY + footF.y) / 2 };
+  const kneeB = { x: (hipX + footB.x) / 2 + face * 4, y: (hipY + footB.y) / 2 };
+
+  // 手
+  const handF = { x: bx + face * pose.armF.x, y: shoulderY + pose.armF.y };
+  const handB = { x: bx + face * pose.armB.x, y: shoulderY + pose.armB.y };
+
+  // 肘（中点 + 下垂）
+  const elbowF = { x: (shoulderX + handF.x) / 2, y: (shoulderY + handF.y) / 2 + 6 };
+  const elbowB = { x: (shoulderX + handB.x) / 2, y: (shoulderY + handB.y) / 2 + 6 };
+
+  // 受击闪白
+  const flashing = f.hitFlash > 0 && (f.hitFlash % 4 < 2);
+  const bodyColor = flashing ? '#ffffff' : f.cfg.tint;
+  const limbColor = flashing ? '#ffffff' : '#c9ced6';
+
+  if (f.state === 'ko') {
+    ctx.globalAlpha = 0.55;
+  }
+
+  // 影子
+  if (f.state !== 'ko') {
+    ctx.fillStyle = 'rgba(0,0,0,.35)';
+    ctx.beginPath();
+    ctx.ellipse(bx, groundY + 4, 34, 8, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // 后腿
+  ctx.strokeStyle = '#8b919b';
+  ctx.lineWidth = 9;
+  ctx.beginPath();
+  ctx.moveTo(hipX, hipY);
+  ctx.lineTo(kneeB.x, kneeB.y);
+  ctx.lineTo(footB.x, footB.y);
+  ctx.stroke();
+
+  // 后臂
+  ctx.lineWidth = 8;
+  ctx.beginPath();
+  ctx.moveTo(shoulderX, shoulderY);
+  ctx.lineTo(elbowB.x, elbowB.y);
+  ctx.lineTo(handB.x, handB.y);
+  ctx.stroke();
+
+  // 躯干
+  ctx.strokeStyle = bodyColor;
+  ctx.lineWidth = 13;
+  ctx.beginPath();
+  ctx.moveTo(hipX, hipY);
+  ctx.lineTo(neckX, neckY);
+  ctx.stroke();
+
+  // 前腿
+  ctx.strokeStyle = limbColor;
+  ctx.lineWidth = 9;
+  ctx.beginPath();
+  ctx.moveTo(hipX, hipY);
+  ctx.lineTo(kneeF.x, kneeF.y);
+  ctx.lineTo(footF.x, footF.y);
+  ctx.stroke();
+
+  // 头
+  ctx.fillStyle = bodyColor;
+  ctx.beginPath();
+  ctx.arc(headX, headY, 12, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 头带（角色标识）
+  ctx.strokeStyle = f.cfg.dark;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(headX - 11, headY - 4);
+  ctx.lineTo(headX + 11, headY - 4);
+  ctx.stroke();
+
+  // 前臂
+  ctx.strokeStyle = limbColor;
+  ctx.lineWidth = 8;
+  ctx.beginPath();
+  ctx.moveTo(shoulderX, shoulderY);
+  ctx.lineTo(elbowF.x, elbowF.y);
+  ctx.lineTo(handF.x, handF.y);
+  ctx.stroke();
+
+  // 武器（跟手，朝向由姿态决定）
+  drawWeapon(f, handF, elbowF, face, bodyColor, pose);
+
+  ctx.globalAlpha = 1;
+
+  // 招式拖影
+  const hb = currentHitbox(f);
+  if (hb && f.state === 'attack') {
+    const w = hitboxWorld(f, hb);
+    ctx.save();
+    ctx.globalAlpha = 0.18;
+    ctx.fillStyle = f.cfg.tint;
+    ctx.beginPath();
+    ctx.ellipse(w.x + w.w / 2, w.y + w.h / 2, w.w * 0.55, w.h * 0.42, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawWeapon(f, hand, elbow, face, color, pose) {
+  // 武器朝向：姿态里给了 wAng 就用它（精确控制劈/刺的方向），否则沿小臂延长
+  let ux, uy;
+  if (pose && typeof pose.wAng === 'number') {
+    ux = face * Math.cos(pose.wAng * RAD);
+    uy = Math.sin(pose.wAng * RAD);
+  } else {
+    const dx = hand.x - elbow.x, dy = hand.y - elbow.y;
+    const l = Math.hypot(dx, dy) || 1;
+    ux = dx / l; uy = dy / l;
+  }
+  // 法线：镜像时跟着翻，保证刀刃始终朝同一侧
+  const nx = -uy * face, ny = ux * face;
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  if (f.cfg.weapon === 'blade') {
+    // ---- 青龙偃月刀：粗柄 + 横护手 + 月牙刀刃 ----
+    ctx.strokeStyle = '#6b5236';
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.moveTo(hand.x - ux * 34, hand.y - uy * 34);
+    ctx.lineTo(hand.x + ux * 30, hand.y + uy * 30);
+    ctx.stroke();
+
+    ctx.strokeStyle = '#c8a75a';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(hand.x + ux * 30 + nx * 11, hand.y + uy * 30 + ny * 11);
+    ctx.lineTo(hand.x + ux * 30 - nx * 11, hand.y + uy * 30 - ny * 11);
+    ctx.stroke();
+
+    const bx = hand.x + ux * 34, by = hand.y + uy * 34;
+    const tx = hand.x + ux * 146, ty = hand.y + uy * 146;
+    const cx1 = hand.x + ux * 96 + nx * 42, cy1 = hand.y + uy * 96 + ny * 42;
+    const cx2 = hand.x + ux * 92 + nx * 8, cy2 = hand.y + uy * 92 + ny * 8;
+
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(bx + nx * 7, by + ny * 7);
+    ctx.quadraticCurveTo(cx1, cy1, tx + nx * 5, ty + ny * 5);
+    ctx.quadraticCurveTo(cx2, cy2, bx - nx * 6, by - ny * 6);
+    ctx.closePath();
+    ctx.fill();
+
+    // 霜刃高光
+    ctx.strokeStyle = 'rgba(255,255,255,.6)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(bx + nx * 7, by + ny * 7);
+    ctx.quadraticCurveTo(cx1, cy1, tx + nx * 5, ty + ny * 5);
+    ctx.stroke();
+
+  } else {
+    // ---- 龙胆亮银枪：细杆 + 红缨 + 菱形枪尖 ----
+    ctx.strokeStyle = '#8a6a45';
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(hand.x - ux * 62, hand.y - uy * 62);
+    ctx.lineTo(hand.x + ux * 102, hand.y + uy * 102);
+    ctx.stroke();
+
+    const rot = Math.atan2(uy, ux);
+    ctx.fillStyle = '#d1534a';
+    ctx.beginPath();
+    ctx.ellipse(hand.x + ux * 92, hand.y + uy * 92, 12, 7, rot, 0, Math.PI * 2);
+    ctx.fill();
+
+    const sx = hand.x + ux * 102, sy = hand.y + uy * 102;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(hand.x + ux * 152 + nx * 8, hand.y + uy * 152 + ny * 8);
+    ctx.lineTo(hand.x + ux * 152 - nx * 8, hand.y + uy * 152 - ny * 8);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(255,255,255,.7)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(hand.x + ux * 148, hand.y + uy * 148);
+    ctx.stroke();
+  }
+
+  ctx.restore();
+}
+
+function getPose(f) {
+  if (f.state === 'ko') return POSES.ko;
+  if (f.state === 'hit') return f.hitstun > 8 ? POSES.hit : POSES.hitDown;
+  if (f.state === 'crouch') return poseOf(f, 'crouch');
+  if (f.state === 'walk') {
+    return (Math.floor(f.animT / 7) % 2 === 0) ? poseOf(f, 'walk1') : poseOf(f, 'walk2');
+  }
+  if (f.state === 'attack' && f.action) {
+    return poseOf(f, f.action.frames[f.frameIdx].pose);
+  }
+  return (Math.floor(f.animT / 32) % 2 === 0) ? poseOf(f, 'idle') : poseOf(f, 'idle2');
+}
+
+// ---------- 判定框可视化 ----------
+function drawBoxes(f) {
+  ctx.save();
+  ctx.lineWidth = 1.5;
+
+  // 受击框 绿
+  const hb = hurtboxOf(f);
+  ctx.strokeStyle = '#4ade80';
+  ctx.fillStyle = 'rgba(74,222,128,.14)';
+  ctx.fillRect(hb.x, hb.y, hb.w, hb.h);
+  ctx.strokeRect(hb.x, hb.y, hb.w, hb.h);
+
+  // 推挤框 蓝
+  const pb = pushboxOf(f);
+  ctx.strokeStyle = '#60a5fa';
+  ctx.setLineDash([5, 4]);
+  ctx.strokeRect(pb.x, pb.y, pb.w, pb.h);
+  ctx.setLineDash([]);
+
+  // 攻击框 红
+  const atk = currentHitbox(f);
+  if (atk) {
+    const w = hitboxWorld(f, atk);
+    ctx.strokeStyle = '#f87171';
+    ctx.fillStyle = 'rgba(248,113,113,.25)';
+    ctx.fillRect(w.x, w.y, w.w, w.h);
+    ctx.strokeRect(w.x, w.y, w.w, w.h);
+  }
+
+  // 原点
+  ctx.strokeStyle = '#fbbf24';
+  ctx.beginPath();
+  ctx.moveTo(f.x - 6, GROUND);
+  ctx.lineTo(f.x + 6, GROUND);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+// ---------- HUD ----------
+function drawHUD() {
+  const barW = 340, barH = 20, top = 34;
+
+  drawBar(60, top, barW, barH, G.p1.hp / G.p1.cfg.hpMax, '#c94f4f', false, G.p1.name);
+  drawBar(W - 60 - barW, top, barW, barH, G.p2.hp / G.p2.cfg.hpMax, '#4f8bd4', true, G.p2.name);
+
+  // 计时
+  ctx.fillStyle = '#8b919b';
+  ctx.font = '500 13px ui-monospace, Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('FRAME ' + frameCount, W / 2, top + 14);
+
+  if (G.p1.hp <= 0 || G.p2.hp <= 0) {
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#f2f4f7';
+    ctx.font = '500 56px -apple-system, "Microsoft YaHei", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(winner === 'draw' ? 'DOUBLE KO' : 'K.O.', W / 2, 250);
+
+    ctx.font = '400 16px -apple-system, "Microsoft YaHei", sans-serif';
+    ctx.fillStyle = '#9aa1ac';
+    const who = winner === 'draw' ? '同归于尽' : (winner ? winner.name + ' 胜' : '');
+    ctx.fillText(who + '　按 R 重开', W / 2, 286);
+    ctx.restore();
+  }
+}
+
+function drawBar(x, y, w, h, pct, color, mirror, label) {
+  // 底
+  ctx.fillStyle = '#22262e';
+  ctx.fillRect(x, y, w, h);
+
+  // 血量
+  const fw = Math.max(0, Math.min(1, pct)) * w;
+  ctx.fillStyle = color;
+  if (mirror) {
+    ctx.fillRect(x + w - fw, y, fw, h);
+  } else {
+    ctx.fillRect(x, y, fw, h);
+  }
+
+  // 描边
+  ctx.strokeStyle = '#3d434e';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+
+  // 名字
+  ctx.fillStyle = '#9aa1ac';
+  ctx.font = '400 12px -apple-system, "Microsoft YaHei", sans-serif';
+  ctx.textAlign = mirror ? 'right' : 'left';
+  ctx.fillText(label, mirror ? x + w : x, y - 8);
+}
+
+// ---------- 帧数据面板 ----------
+function drawFrameData() {
+  const lines = [];
+  const dump = (f, tag) => {
+    const fr = (f.state === 'attack' && f.action) ? f.action.frames[f.frameIdx] : null;
+    const segs = f.action ? f.action.frames.filter(x => x.hit).length : 0;
+    lines.push(
+      tag + ' ' + f.name +
+      ' | ' + f.state +
+      (f.actName ? ':' + f.actName : '') +
+      ' | f' + f.frameIdx + '/' + (f.action ? f.action.frames.length : 0) +
+      ' dur' + (fr ? fr.dur : '-') +
+      (segs > 1 ? ' | 段' + segs : '') +
+      ' | hp' + f.hp +
+      (f.hitstun ? ' | stun' + f.hitstun : '')
+    );
+  };
+  dump(G.p1, 'P1');
+  dump(G.p2, 'P2');
+  lines.push('hitstop ' + hitstop + ' | logFrame ' + frameCount);
+
+  const bw = 460, bh = 78;
+  const bx = W / 2 - bw / 2, by = H - bh - 16;
+
+  ctx.save();
+  ctx.fillStyle = 'rgba(18,20,25,.9)';
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.strokeStyle = '#3d434e';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(bx + .5, by + .5, bw - 1, bh - 1);
+
+  ctx.fillStyle = '#9aa1ac';
+  ctx.font = '400 12px ui-monospace, Consolas, monospace';
+  ctx.textAlign = 'left';
+  lines.forEach((t, i) => ctx.fillText(t, bx + 12, by + 20 + i * 20));
+  ctx.restore();
+}
+
+function drawPausedOverlay() {
+  ctx.save();
+  ctx.fillStyle = _qs.has('nodim') ? 'rgba(10,12,16,.08)' : 'rgba(10,12,16,.55)';
+  ctx.fillRect(0, 0, W, H);
+  if (_qs.has('nodim')) { ctx.restore(); return; }
+  ctx.fillStyle = '#e8ebf0';
+  ctx.font = '500 22px -apple-system, "Microsoft YaHei", sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText('已暂停　, / . 逐帧', W / 2, H / 2);
+  ctx.restore();
+}
+
+// ============================================================
+// 主循环
+// ============================================================
+let acc = 0;
+let lastT = performance.now();
+
+function loop(now) {
+  const dt = Math.min(now - lastT, 200);
+  lastT = now;
+
+  if (!paused) {
+    acc += dt;
+    let guard = 0;
+    while (acc >= STEP_MS && guard < 5) { step(); acc -= STEP_MS; guard++; }
+    if (guard >= 5) acc = 0;
+  }
+
+  render();
+  requestAnimationFrame(loop);
+}
+
+// ============================================================
+// 键盘
+// ============================================================
+window.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+
+  if (k === 'f1') { showBoxes = !showBoxes; e.preventDefault(); }
+  if (k === 'f2') { showData = !showData; e.preventDefault(); }
+  if (k === 'r') { resetGame(); e.preventDefault(); }
+  if (k === 'p') { paused = !paused; e.preventDefault(); }
+
+  // 调试热键：直接释放双方大招（绕过搓招，方便逐帧观察特效）
+  if (k === 'k' && G) { startAction(G.p1, 'special'); e.preventDefault(); }
+  if (k === 'l' && G) { startAction(G.p2, 'special'); e.preventDefault(); }
+
+  if (paused) {
+    if (k === '.') { step(); e.preventDefault(); }
+    if (k === ',') { /* 后退步进：原型阶段不做历史回放 */ e.preventDefault(); }
+  }
+
+  if (['a','d','s','j','w','arrowleft','arrowright','arrowdown'].includes(k)) e.preventDefault();
+});
+
+window.addEventListener('keyup', e => {
+  keys[e.key.toLowerCase()] = false;
+});
+
+window.addEventListener('blur', () => {
+  for (const k in keys) keys[k] = false;
+});
+
+// ============================================================
+// 启动
+// ============================================================
+const _qs = new URLSearchParams(location.search);
+if (_qs.has('boxes')) showBoxes = true;
+if (_qs.has('data')) showData = true;
+if (_qs.has('pause')) paused = true;
+
+resetGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# 设计文档/评估/复盘：不属于仓库门面，只留在本地与私有仓库
+design/
+docs/
+production/
+art/
+game/
+
+# 本地缓存与托管标记
+.workbuddy/
+.wbapp_*.genie
+*.log
+.DS_Store
+Thumbs.db
