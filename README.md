@@ -2,9 +2,7 @@
 
 三国题材 2D 对战的**可玩技术原型**：关羽（玩家）对赵云（AI），**单文件 HTML、零依赖、无构建**，双击即玩。画面是火柴人，重点在帧数据表、三框判定与打击感，不在美术。
 
-> 🎮 **在线直接玩（国内直连）**：<https://sanguo-duel-36985.app.workbuddy.host/?sharecode=TVHAXCYMXC>
->
-> 🌐 **GitHub Pages**：<https://johnnysilverhandv.github.io/sanguo-duel/>
+> 🌐 **在线直接玩（GitHub Pages）**：<https://johnnysilverhandv.github.io/sanguo-duel/>
 >
 > 📦 **离线版下载**：[GitHub Releases](https://github.com/JohnnySilverhandV/sanguo-duel/releases) ｜ [码云 Releases](https://gitee.com/johnny-silver-hand123/sanguo-duel/releases)
 
